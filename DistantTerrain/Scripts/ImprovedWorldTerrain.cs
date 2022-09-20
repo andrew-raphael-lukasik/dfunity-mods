@@ -10,71 +10,64 @@
 #define LOAD_TREE_COVERAGE_MAP
 
 using UnityEngine;
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.IO;
-using System.Text; // for Encoding.UTF8
 using DaggerfallConnect;
 using DaggerfallConnect.Arena2;
 using DaggerfallConnect.Utility;
 using DaggerfallWorkshop;
 using DaggerfallWorkshop.Game;
 using DaggerfallWorkshop.Utility;
+using Unity.Mathematics;
+using Unity.Profiling;
+
+using IO = System.IO;
+using Text = System.Text;// for Encoding.UTF8
 
 namespace DistantTerrain
 {
-    /// <summary>    
-    /// </summary>
+    /// <summary> </summary>
     public static class ImprovedWorldTerrain
     {
 
-        const string filenameMapLocationRangeX = "mapLocationRangeX.bin";
-        const string filenameMapLocationRangeY = "mapLocationRangeY.bin";
-        const string filenameTreeCoverageMap = "mapTreeCoverage.bin";
+        const string
+            filenameMapLocationRangeX = "mapLocationRangeX.bin",
+            filenameMapLocationRangeY = "mapLocationRangeY.bin",
+            filenameTreeCoverageMap = "mapTreeCoverage.bin",
+            out_filepathMapLocationRangeX = "Game/Addons/DistantTerrain/Resources/mapLocationRangeX_out.bin", // only used on manual trigger in unity editor - never in executable - so it should be ok
+            out_filepathMapLocationRangeY = "Game/Addons/DistantTerrain/Resources/mapLocationRangeY_out.bin", //  only used on manual trigger in unity editor - never in executable - so it should be ok
+            out_filepathOutTreeCoverageMap = "Game/Addons/DistantTerrain/Resources/mapTreeCoverage_out.bin"; //  only used on manual trigger in unity editor - never in executable - so it should be ok
+
+        const float
+            minDistanceFromWaterForExtraExaggeration = 3.0f, // when does exaggeration start in terms of how far does terrain have to be away from water
+            exaggerationFactorWaterDistance = 0.075f, // 0.15f; //0.123f; //0.15f; // how strong is the distance from water incorporated into the multiplier
+            extraExaggerationFactorLocationDistance = 0.0275f; // how strong is the distance from locations incorporated into the multiplier
         
-        const string out_filepathMapLocationRangeX = "Game/Addons/DistantTerrain/Resources/mapLocationRangeX_out.bin"; // only used on manual trigger in unity editor - never in executable - so it should be ok
-        const string out_filepathMapLocationRangeY = "Game/Addons/DistantTerrain/Resources/mapLocationRangeY_out.bin"; //  only used on manual trigger in unity editor - never in executable - so it should be ok
-        const string out_filepathOutTreeCoverageMap = "Game/Addons/DistantTerrain/Resources/mapTreeCoverage_out.bin"; //  only used on manual trigger in unity editor - never in executable - so it should be ok
+        public const float
+            maxHeightsExaggerationMultiplier = 25.0f, // this directly affects maxTerrainHeight in TerrainHelper.cs: maxTerrainHeight should be maxHeightsExaggerationMultiplier * baseHeightScale * 128 + noiseMapScale * 128 + extraNoiseScale
+        // additional height noise based on climate
+            additionalHeightNoiseClimateOcean = 0.0f,
+            additionalHeightNoiseClimateDesert = 0.85f, //0.35f;
+            additionalHeightNoiseClimateDesert2 = 1.05f,
+            additionalHeightNoiseClimateMountain = 0.45f,
+            additionalHeightNoiseClimateRainforest = 0.77f,
+            additionalHeightNoiseClimateSwamp = 1.7f,
+            additionalHeightNoiseClimateSubtropical = 0.65f,
+            additionalHeightNoiseClimateMountainWoods = 1.05f,
+            additionalHeightNoiseClimateWoodlands = 0.59f, //0.45f;
+            additionalHeightNoiseClimateHauntedWoodlands = 0.25f;
 
-        const float minDistanceFromWaterForExtraExaggeration = 3.0f; // when does exaggeration start in terms of how far does terrain have to be away from water
-        const float exaggerationFactorWaterDistance = 0.075f; // 0.15f; //0.123f; //0.15f; // how strong is the distance from water incorporated into the multiplier
-        const float extraExaggerationFactorLocationDistance = 0.0275f; // how strong is the distance from locations incorporated into the multiplier
-        public const float maxHeightsExaggerationMultiplier = 25.0f; // this directly affects maxTerrainHeight in TerrainHelper.cs: maxTerrainHeight should be maxHeightsExaggerationMultiplier * baseHeightScale * 128 + noiseMapScale * 128 + extraNoiseScale
+        private static float[]
+            mapDistanceSquaredFromWater = null,// 2D distance transform image - squared distance to water pixels of the world map
+            mapDistanceSquaredFromLocations = null,// 2D distance transform image - squared distance to world map pixels with location
+            mapMultipliers = null;// map of multiplier values
 
-        // additional height noise based on climate        
-        public const float additionalHeightNoiseClimateOcean = 0.0f;
-        public const float additionalHeightNoiseClimateDesert = 0.85f; //0.35f;
-        public const float additionalHeightNoiseClimateDesert2 = 1.05f;
-        public const float additionalHeightNoiseClimateMountain = 0.45f;
-        public const float additionalHeightNoiseClimateRainforest = 0.77f;
-        public const float additionalHeightNoiseClimateSwamp = 1.7f;
-        public const float additionalHeightNoiseClimateSubtropical = 0.65f;
-        public const float additionalHeightNoiseClimateMountainWoods = 1.05f;
-        public const float additionalHeightNoiseClimateWoodlands = 0.59f; //0.45f;
-        public const float additionalHeightNoiseClimateHauntedWoodlands = 0.25f;        
-
-        // 2D distance transform image - squared distance to water pixels of the world map
-        private static float[] mapDistanceSquaredFromWater = null;
-
-        // 2D distance transform image - squared distance to world map pixels with location
-        private static float[] mapDistanceSquaredFromLocations = null;
-
-        // map of multiplier values
-        private static float[] mapMultipliers = null;
-
-        // map with location positions
-        private static byte[] mapLocations = null;
-
-        // map with tree coverage
-        private static byte[] mapTreeCoverage = null;
-
-        private static byte[] mapLocationRangeX = null;
-        private static byte[] mapLocationRangeY = null;
+        private static byte[]
+            mapLocations = null,// map with location positions
+            mapTreeCoverage = null,// map with tree coverage
+            mapLocationRangeX = null,
+            mapLocationRangeY = null;
 
         // indicates if improved terrain is initialized (InitImprovedWorldTerrain() function was called)
         private static bool init = false;
-
         public static bool IsInit { get { return init; } }
 
         public static void Unload()
@@ -142,6 +135,16 @@ namespace DistantTerrain
             set { mapDistanceSquaredFromWater = value; }
         }
 
+        #region Profiler Markers
+
+        static readonly ProfilerMarker
+            ___InitImprovedWorldTerrain = new ProfilerMarker($"{nameof(ImprovedWorldTerrain)}::{nameof(InitImprovedWorldTerrain)}"),
+            ___ImageDistanceTransform = new ProfilerMarker($"{nameof(ImprovedWorldTerrain)}::{nameof(ImageDistanceTransform)}"),
+            ___DistanceTransform1D = new ProfilerMarker($"{nameof(ImprovedWorldTerrain)}::{nameof(DistanceTransform1D)}"),
+            ___DistanceTransform2D = new ProfilerMarker($"{nameof(ImprovedWorldTerrain)}::{nameof(DistanceTransform2D)}");
+
+        #endregion
+
         /// <summary>
         /// gets the distance to water for a given world map pixel.
         /// </summary>
@@ -149,7 +152,7 @@ namespace DistantTerrain
         {
             if (init)
             {
-                return ((float)Math.Sqrt(mapDistanceSquaredFromWater[mapPixelY * WoodsFile.mapWidthValue + mapPixelX]));
+                return ((float)math.sqrt(mapDistanceSquaredFromWater[mapPixelY * WoodsFile.mapWidthValue + mapPixelX]));
             }
             else
             {
@@ -225,6 +228,8 @@ namespace DistantTerrain
         /// </summary>
         public static void InitImprovedWorldTerrain(ContentReader contentReader)
         {
+            ___InitImprovedWorldTerrain.Begin();
+
             if (!init)
             {
                 #if CREATE_PERSISTENT_LOCATION_RANGE_MAPS
@@ -237,31 +242,30 @@ namespace DistantTerrain
 
                     //int y = 204;
                     //int x = 718;
+                    var mapFileReader = contentReader.MapFileReader;
                     for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int x = 0; x < width; x++)
-                        {
-                            //MapPixelData MapData = TerrainHelper.GetMapPixelData(contentReader, x, y);
-                            //if (MapData.hasLocation)
-                            //{
-                            //    int locationRangeX = (int)MapData.locationRect.xMax - (int)MapData.locationRect.xMin;
-                            //    int locationRangeY = (int)MapData.locationRect.yMax - (int)MapData.locationRect.yMin;
-                            //}
+                        //MapPixelData MapData = TerrainHelper.GetMapPixelData(contentReader, x, y);
+                        //if (MapData.hasLocation)
+                        //{
+                        //    int locationRangeX = (int)MapData.locationRect.xMax - (int)MapData.locationRect.xMin;
+                        //    int locationRangeY = (int)MapData.locationRect.yMax - (int)MapData.locationRect.yMin;
+                        //}
 
-                            ContentReader.MapSummary mapSummary;
-                            int regionIndex = -1, mapIndex = -1;
-                            bool hasLocation = contentReader.HasLocation(x, y, out mapSummary);
-                            if (hasLocation)
-                            {   
-                                regionIndex = mapSummary.RegionIndex;
-                                mapIndex = mapSummary.MapIndex;
-                                DFLocation location = contentReader.MapFileReader.GetLocation(regionIndex, mapIndex);
-                                byte locationRangeX = location.Exterior.ExteriorData.Width;
-                                byte locationRangeY = location.Exterior.ExteriorData.Height;
+                        ContentReader.MapSummary mapSummary;
+                        int regionIndex = -1, mapIndex = -1;
+                        bool hasLocation = contentReader.HasLocation(x, y, out mapSummary);
+                        if (hasLocation)
+                        {   
+                            regionIndex = mapSummary.RegionIndex;
+                            mapIndex = mapSummary.MapIndex;
+                            DFLocation location = mapFileReader.GetLocation(regionIndex, mapIndex);
+                            byte locationRangeX = location.Exterior.ExteriorData.Width;
+                            byte locationRangeY = location.Exterior.ExteriorData.Height;
 
-                                mapLocationRangeX[y * width + x] = locationRangeX;
-                                mapLocationRangeY[y * width + x] = locationRangeY;
-                            }
+                            mapLocationRangeX[y * width + x] = locationRangeX;
+                            mapLocationRangeY[y * width + x] = locationRangeY;
                         }
                     }
               
@@ -287,12 +291,12 @@ namespace DistantTerrain
                     mapLocationRangeX = new byte[width * height];
                     mapLocationRangeY = new byte[width * height];
 
-                    MemoryStream istream;
+                    IO.MemoryStream istream;
                     TextAsset assetMapLocationRangeX = Resources.Load<TextAsset>(filenameMapLocationRangeX);
                     if (assetMapLocationRangeX != null)
                     {
-                        istream = new MemoryStream(assetMapLocationRangeX.bytes);
-                        BinaryReader readerMapLocationRangeX = new BinaryReader(istream, Encoding.UTF8);
+                        istream = new IO.MemoryStream(assetMapLocationRangeX.bytes);
+                        IO.BinaryReader readerMapLocationRangeX = new IO.BinaryReader(istream, Text.Encoding.UTF8);
                         readerMapLocationRangeX.Read(mapLocationRangeX, 0, width * height);
                         readerMapLocationRangeX.Close();
                         istream.Close();
@@ -301,8 +305,8 @@ namespace DistantTerrain
                     TextAsset assetMapLocationRangeY = Resources.Load<TextAsset>(filenameMapLocationRangeY);
                     if (assetMapLocationRangeY)
                     {
-                        istream = new MemoryStream(assetMapLocationRangeY.bytes);
-                        BinaryReader readerMapLocationRangeY = new BinaryReader(istream, Encoding.UTF8);
+                        istream = new IO.MemoryStream(assetMapLocationRangeY.bytes);
+                        IO.BinaryReader readerMapLocationRangeY = new IO.BinaryReader(istream, Text.Encoding.UTF8);
                         readerMapLocationRangeY.Read(mapLocationRangeY, 0, width * height);
                         readerMapLocationRangeY.Close();
                         istream.Close();
@@ -329,15 +333,12 @@ namespace DistantTerrain
                     int width = WoodsFile.mapWidthValue;
                     int height = WoodsFile.mapHeightValue;
                     for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int x = 0; x < width; x++)
-                        {
-                            if (heightMapArray[y * width + x] <= 2)
-                                heightMapArray[y * width + x] = 1;
-                            else
-                                heightMapArray[y * width + x] = 0;
-                        }
+                        int i = y * width + x;
+                        heightMapArray[i] = heightMapArray[i] <= 2 ? (byte)1 : (byte)0;
                     }
+
                     //now set image borders to "water" (this is a workaround to prevent mountains to become too high in north-east and south-east edge of map)
                     for (int y = 0; y < height; y++)
                     {
@@ -350,7 +351,7 @@ namespace DistantTerrain
                         heightMapArray[(height - 1) * width + x] = 1;
                     }
 
-                    mapDistanceSquaredFromWater = imageDistanceTransform(heightMapArray, width, height, 1);
+                    mapDistanceSquaredFromWater = ImageDistanceTransform(heightMapArray, width, height, 1);
 
                     heightMapArray = null;
                 }
@@ -361,18 +362,13 @@ namespace DistantTerrain
                     int height = WoodsFile.mapHeightValue;
                     mapLocations = new byte[width * height];
 
+                    ContentReader.MapSummary summary = default(ContentReader.MapSummary);
                     for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int x = 0; x < width; x++)
-                        {
-                            ContentReader.MapSummary summary;
-                            if (contentReader.HasLocation(x + 1, y+1, out summary))
-                                mapLocations[y * width + x] = 1;
-                            else
-                                mapLocations[y * width + x] = 0;
-                        }
+                        mapLocations[y * width + x] = contentReader.HasLocation(x + 1, y+1, out summary) ? (byte)1 : (byte)0;
                     }
-                    mapDistanceSquaredFromLocations = imageDistanceTransform(mapLocations, width, height, 1);
+                    mapDistanceSquaredFromLocations = ImageDistanceTransform(mapLocations, width, height, 1);
                 }                
 
                 if (mapMultipliers == null)
@@ -383,38 +379,35 @@ namespace DistantTerrain
 
                     // compute the multiplier and store it in mapMultipliers
                     for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int x = 0; x < width; x++)
-                        {
-                            float distanceFromWater = (float)Math.Sqrt(mapDistanceSquaredFromWater[y * WoodsFile.mapWidthValue + x]);
-                            float distanceFromLocation = (float)Math.Sqrt(mapDistanceSquaredFromLocations[y * WoodsFile.mapWidthValue + x]);
-                            float multiplierLocation = (distanceFromLocation * extraExaggerationFactorLocationDistance + 1.0f); // terrain distant from location gets extra exaggeration
-                            if (distanceFromWater < minDistanceFromWaterForExtraExaggeration) // except if it is near water
-                                multiplierLocation = 1.0f;
+                        float distanceFromWater = (float)math.sqrt(mapDistanceSquaredFromWater[y * width + x]);
+                        float distanceFromLocation = (float)math.sqrt(mapDistanceSquaredFromLocations[y * width + x]);
+                        float multiplierLocation = (distanceFromLocation * extraExaggerationFactorLocationDistance + 1.0f); // terrain distant from location gets extra exaggeration
+                        if (distanceFromWater < minDistanceFromWaterForExtraExaggeration) // except if it is near water
+                            multiplierLocation = 1.0f;
 
-                            // Seed random with terrain key
-                            UnityEngine.Random.InitState(TerrainHelper.MakeTerrainKey(x, y));
+                        // Seed random with terrain key
+                        UnityEngine.Random.InitState(TerrainHelper.MakeTerrainKey(x, y));
 
-                            float additionalHeightBasedOnClimate = GetAdditionalHeightBasedOnClimate(x, y);
-                            float additionalHeightApplied = UnityEngine.Random.Range(-additionalHeightBasedOnClimate * 0.5f, additionalHeightBasedOnClimate);
-                            mapMultipliers[y * width + x] = (Math.Min(maxHeightsExaggerationMultiplier, additionalHeightApplied + /*multiplierLocation **/ Math.Max(1.0f, distanceFromWater * exaggerationFactorWaterDistance)));
-                        }
+                        float additionalHeightBasedOnClimate = GetAdditionalHeightBasedOnClimate(x, y);
+                        float additionalHeightApplied = UnityEngine.Random.Range(-additionalHeightBasedOnClimate * 0.5f, additionalHeightBasedOnClimate);
+                        mapMultipliers[y * width + x] = (math.min(maxHeightsExaggerationMultiplier, additionalHeightApplied + /*multiplierLocation **/ math.max(1.0f, distanceFromWater * exaggerationFactorWaterDistance)));
                     }
 
                     // multipliedMap gets smoothed
                     float[] newmapMultipliers = mapMultipliers.Clone() as float[];
                     float[,] weights = { { 0.0625f, 0.125f, 0.0625f }, { 0.125f, 0.25f, 0.125f }, { 0.0625f, 0.125f, 0.0625f } };
                     for (int y = 1; y < height - 1; y++)
+                    for (int x = 1; x < width - 1; x++)
                     {
-                        for (int x = 1; x < width - 1; x++)
+                        int i = y * width + x;
+                        if (mapDistanceSquaredFromLocations[i] <= 2) // at and around locations ( <= 2 ... only map pixels in 8-connected neighborhood (distanceFromLocationMaps stores squared distances...))
                         {
-                            if (mapDistanceSquaredFromLocations[y * width + x] <= 2) // at and around locations ( <= 2 ... only map pixels in 8-connected neighborhood (distanceFromLocationMaps stores squared distances...))
-                            {
-                                newmapMultipliers[y * width + x] =
-                                    weights[0, 0] * mapMultipliers[(y - 1) * width + (x - 1)] + weights[0, 1] * mapMultipliers[(y - 1) * width + (x)] + weights[0, 2] * mapMultipliers[(y - 1) * width + (x + 1)] +
-                                    weights[1, 0] * mapMultipliers[(y - 0) * width + (x - 1)] + weights[1, 1] * mapMultipliers[(y - 0) * width + (x)] + weights[1, 2] * mapMultipliers[(y - 0) * width + (x + 1)] +
-                                    weights[2, 0] * mapMultipliers[(y + 1) * width + (x - 1)] + weights[2, 1] * mapMultipliers[(y + 1) * width + (x)] + weights[2, 2] * mapMultipliers[(y + 1) * width + (x + 1)];
-                            }
+                            newmapMultipliers[i] =
+                                weights[0, 0] * mapMultipliers[(y - 1) * width + (x - 1)] + weights[0, 1] * mapMultipliers[(y - 1) * width + (x)] + weights[0, 2] * mapMultipliers[(y - 1) * width + (x + 1)] +
+                                weights[1, 0] * mapMultipliers[(y - 0) * width + (x - 1)] + weights[1, 1] * mapMultipliers[(y - 0) * width + (x)] + weights[1, 2] * mapMultipliers[(y - 0) * width + (x + 1)] +
+                                weights[2, 0] * mapMultipliers[(y + 1) * width + (x - 1)] + weights[2, 1] * mapMultipliers[(y + 1) * width + (x)] + weights[2, 2] * mapMultipliers[(y + 1) * width + (x + 1)];
                         }
                     }
                     mapMultipliers = newmapMultipliers;
@@ -430,18 +423,16 @@ namespace DistantTerrain
                     byte[] heightMapBuffer = contentReader.WoodsFileReader.Buffer.Clone() as byte[];
                     int[,] intWeights = { { 1, 2, 1 }, { 2, 4, 2 }, { 1, 2, 1 } };
                     for (int y = 1; y < height - 1; y++)
+                    for (int x = 1; x < width - 1; x++)
                     {
-                        for (int x = 1; x < width - 1; x++)
+                        if (mapDistanceSquaredFromWater[y * width + x] > 0) // check if squared distance from water is greater than zero -> if it is no water pixel
                         {
-                            if (mapDistanceSquaredFromWater[y * width + x] > 0) // check if squared distance from water is greater than zero -> if it is no water pixel
-                            {
-                                int value =
-                                    intWeights[0, 0] * (int)heightMapBuffer[(y - 1) * width + (x - 1)] + intWeights[0, 1] * (int)heightMapBuffer[(y - 1) * width + (x)] + intWeights[0, 2] * (int)heightMapBuffer[(y - 1) * width + (x + 1)] +
-                                    intWeights[1, 0] * (int)heightMapBuffer[(y - 0) * width + (x - 1)] + intWeights[1, 1] * (int)heightMapBuffer[(y - 0) * width + (x)] + intWeights[1, 2] * (int)heightMapBuffer[(y - 0) * width + (x + 1)] +
-                                    intWeights[2, 0] * (int)heightMapBuffer[(y + 1) * width + (x - 1)] + intWeights[2, 1] * (int)heightMapBuffer[(y + 1) * width + (x)] + intWeights[2, 2] * (int)heightMapBuffer[(y + 1) * width + (x + 1)];
+                            int value =
+                                intWeights[0, 0] * (int)heightMapBuffer[(y - 1) * width + (x - 1)] + intWeights[0, 1] * (int)heightMapBuffer[(y - 1) * width + (x)] + intWeights[0, 2] * (int)heightMapBuffer[(y - 1) * width + (x + 1)] +
+                                intWeights[1, 0] * (int)heightMapBuffer[(y - 0) * width + (x - 1)] + intWeights[1, 1] * (int)heightMapBuffer[(y - 0) * width + (x)] + intWeights[1, 2] * (int)heightMapBuffer[(y - 0) * width + (x + 1)] +
+                                intWeights[2, 0] * (int)heightMapBuffer[(y + 1) * width + (x - 1)] + intWeights[2, 1] * (int)heightMapBuffer[(y + 1) * width + (x)] + intWeights[2, 2] * (int)heightMapBuffer[(y + 1) * width + (x + 1)];
 
-                                heightMapBuffer[y * width + x] = (byte)(value / 16);
-                            }
+                            heightMapBuffer[y * width + x] = (byte)(value / 16);
                         }
                     }
                     contentReader.WoodsFileReader.Buffer = heightMapBuffer;
@@ -464,55 +455,53 @@ namespace DistantTerrain
                         float maxTreeCoverageSaturated = ImprovedTerrainSampler.baseHeightScale * 60.0f;
                         float endTreeCoverageAtElevation = ImprovedTerrainSampler.baseHeightScale * 80.0f;
                         //float maxElevation = 0.0f;
+                        var woodsFileReaderBuffer = contentReader.WoodsFileReader.Buffer;
                         for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
                         {
-                            for (int x = 0; x < width; x++)
+                            int readIndex = (height - 1 - y) * width + x;
+                            float w = 0.0f;
+
+                            //float elevation = ((float)woodsFileReaderBuffer[(height - 1 - y) * width + x]) / 255.0f; // *mapMultipliers[index];
+                            float elevation = ((float)woodsFileReaderBuffer[readIndex]) * mapMultipliers[readIndex];
+
+                            //maxElevation = math.max(maxElevation, elevation);
+                            if ((elevation > minTreeCoverageSaturated) && (elevation < maxTreeCoverageSaturated))
                             {
-                                int readIndex = (height - 1 - y) * width + x;
-                                float w = 0.0f;
-
-                                //float elevation = ((float)contentReader.WoodsFileReader.Buffer[(height - 1 - y) * width + x]) / 255.0f; // *mapMultipliers[index];
-                                float elevation = ((float)contentReader.WoodsFileReader.Buffer[readIndex]) * mapMultipliers[readIndex];
-
-                                //maxElevation = Math.Max(maxElevation, elevation);
-                                if ((elevation > minTreeCoverageSaturated) && (elevation < maxTreeCoverageSaturated))
-                                {
-                                    w = 1.0f;
-                                }
-                                else if ((elevation >= startTreeCoverageAtElevation) && (elevation <= minTreeCoverageSaturated))
-                                {
-                                    w = (elevation - startTreeCoverageAtElevation) / (minTreeCoverageSaturated - startTreeCoverageAtElevation);
-                                }
-                                else if ((elevation >= maxTreeCoverageSaturated) && (elevation <= endTreeCoverageAtElevation))
-                                {
-                                    w = 1.0f - ((elevation - maxTreeCoverageSaturated) / (endTreeCoverageAtElevation - maxTreeCoverageSaturated));
-                                }
-
-                                //w = 0.65f * w + 0.35f * Math.Min(6.0f, (float)Math.Sqrt(mapDistanceSquaredFromLocations[y * width + x])) / 6.0f;
-
-                                mapTreeCoverage[(y) * width + x] = Convert.ToByte(w * 255.0f);
-
-                                //if (elevation>0.05f)
-                                //    mapTreeCoverage[index] = Convert.ToByte(250); //w * 255.0f);
-                                //else mapTreeCoverage[index] = Convert.ToByte(0);
-
-                                //if (elevation >= startTreeCoverageAtElevation)
-                                //{
-                                //    mapTreeCoverage[(y) * width + x] = Convert.ToByte(255.0f);
-                                //} else{
-                                //    mapTreeCoverage[(y) * width + x] = Convert.ToByte(0.0f);
-                                //}
+                                w = 1.0f;
                             }
+                            else if ((elevation >= startTreeCoverageAtElevation) && (elevation <= minTreeCoverageSaturated))
+                            {
+                                w = (elevation - startTreeCoverageAtElevation) / (minTreeCoverageSaturated - startTreeCoverageAtElevation);
+                            }
+                            else if ((elevation >= maxTreeCoverageSaturated) && (elevation <= endTreeCoverageAtElevation))
+                            {
+                                w = 1.0f - ((elevation - maxTreeCoverageSaturated) / (endTreeCoverageAtElevation - maxTreeCoverageSaturated));
+                            }
+
+                            //w = 0.65f * w + 0.35f * math.min(6.0f, (float)math.sqrt(mapDistanceSquaredFromLocations[y * width + x])) / 6.0f;
+
+                            mapTreeCoverage[y * width + x] = Convert.ToByte(w * 255.0f);
+
+                            //if (elevation>0.05f)
+                            //    mapTreeCoverage[index] = Convert.ToByte(250); //w * 255.0f);
+                            //else mapTreeCoverage[index] = Convert.ToByte(0);
+
+                            //if (elevation >= startTreeCoverageAtElevation)
+                            //{
+                            //    mapTreeCoverage[(y) * width + x] = Convert.ToByte(255.0f);
+                            //} else{
+                            //    mapTreeCoverage[(y) * width + x] = Convert.ToByte(0.0f);
+                            //}
                         }
                     }
                     #else
                     {
-                        MemoryStream istream;
                         TextAsset assetMapTreeCoverage = Resources.Load<TextAsset>(filenameTreeCoverageMap);
                         if (assetMapTreeCoverage)
                         {
-                            istream = new MemoryStream(assetMapTreeCoverage.bytes);
-                            BinaryReader readerMapTreeCoverage = new BinaryReader(istream, Encoding.UTF8);
+                            IO.MemoryStream istream = new IO.MemoryStream(assetMapTreeCoverage.bytes);
+                            IO.BinaryReader readerMapTreeCoverage = new IO.BinaryReader(istream, Text.Encoding.UTF8);
                             readerMapTreeCoverage.Read(mapTreeCoverage, 0, width * height);
                             readerMapTreeCoverage.Close();
                             istream.Close();
@@ -534,34 +523,39 @@ namespace DistantTerrain
                 
                 init = true;
             }
+
+            ___InitImprovedWorldTerrain.End();
         }
 
         /* distance transform of image (will get binarized) using squared distance */
-        public static float[] imageDistanceTransform(byte[] imgIn, int width, int height, byte maskValue)
+        public static float[] ImageDistanceTransform(byte[] imgIn, int width, int height, byte maskValue)
         {
-            const float INF = 1E20f;
+            ___ImageDistanceTransform.Begin();
+
             // allocate image and initialize
             float[] imgOut = new float[width * height];
             for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
             {
-                for (int x = 0; x < width; x++)
-                {
-                    if (imgIn[y * width + x] == maskValue)
-                        imgOut[y * width + x] = 0; // pixels with maskValue -> distance 0
-                    else
-                        imgOut[y * width + x] = INF; // set to infinite
-                }
+                int i = y * width + x;
+                imgOut[i] = imgIn[i] == maskValue
+                    ? 0 // pixels with maskValue -> distance 0
+                    : 1E20f; // set to infinite
             }
 
-            distanceTransform2D(ref imgOut, width, height);
+            DistanceTransform2D(imgOut, width, height);
+            
+            ___ImageDistanceTransform.End();
             return imgOut;
         }
 
         /* euklidean distance transform (based on an implementation of Pedro Felzenszwalb (from paper Fast distance transform in C++ by Felzenszwalb and Huttenlocher))*/
 
         /* distance transform of 1d function using squared distance */
-        private static float[] distanceTransform1D(ref float[] f, int n)
+        private static float[] DistanceTransform1D(float[] f, int n)
         {
+            ___DistanceTransform1D.Begin();
+
             const float INF = 1E20f;
 
             float[] d = new float[n];
@@ -593,12 +587,16 @@ namespace DistantTerrain
                 d[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
             }
 
+            ___DistanceTransform1D.End();
             return d;
         }
+
         /* in-place 2D distance transform on float array using squared distance, float array must be initialized with 0 for maskValue-pixels and infinite otherwise*/
-        private static void distanceTransform2D(ref float[] img, int width, int height)
+        private static void DistanceTransform2D(float[] img, int width, int height)
         {
-            float[] f = new float[Math.Max(width, height)];
+            ___DistanceTransform2D.Begin();
+
+            float[] f = new float[math.max(width, height)];
 
             // transform along columns
             for (int x = 0; x < width; x++)
@@ -607,7 +605,7 @@ namespace DistantTerrain
                 {
                     f[y] = img[y * width + x];
                 }
-                float[] d = distanceTransform1D(ref f, height);
+                float[] d = DistanceTransform1D(f, height);
                 for (int y = 0; y < height; y++)
                 {
                     img[y * width + x] = d[y];
@@ -621,12 +619,15 @@ namespace DistantTerrain
                 {
                     f[x] = img[y * width + x];
                 }
-                float[] d = distanceTransform1D(ref f, width);
+                float[] d = DistanceTransform1D(f, width);
                 for (int x = 0; x < width; x++)
                 {
                     img[y * width + x] = d[x];
                 }
             }
+
+            ___DistanceTransform2D.End();
         }
+
     }
 }
